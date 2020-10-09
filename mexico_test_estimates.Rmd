@@ -1,0 +1,1357 @@
+---
+title: "codigo_manuscrito"
+author: "Isaac Núñez"
+date: "14/8/2020"
+output: html_document
+---
+
+
+Code for the estimation of COVID-19 cases in Mexico among tested people considering false negatives.
+
+
+Daily databases must be downloaded from this site in a .csv format (which is the default): https://www.gob.mx/salud/documentos/datos-abiertos-bases-historicas-direccion-general-de-epidemiologia up to September 21st (the last database we used) and stored (preferentially) in a nearby folder. All file directions will have to be changed to that of the computer executing the code to replicate the analysis in the paper. Databases of posterior dates can be used to update the estimates. 
+In case the site to download the data is not functioning, we can share the stored databases per request.
+
+
+
+```{r Necessary packages and dataframes, echo = F, message=F, warning=F}
+library(tidyverse);library(lubridate);library(readr);library(data.table);library(patchwork);library(scales);library(flextable)
+
+#Location of the most recent open database available at the government website (September 21st in our case) for the per-occurrence date analysis
+covid_mx <- read_csv("~/Protocolos de investigación/BASE COVID GOB/Bases de datos diarias/200921COVID19MEXICO.csv")
+names(covid_mx) <- tolower(names(covid_mx))
+
+#Previously saved dataframe of the test precision obtained from the analysis by Kucirca et al. expanded to 21 days of symptoms, available at the same repository 
+load("~/Protocolos de investigación/BASE COVID GOB/covid_mex/main_analysis_25.Rda")
+
+Sys.setlocale("LC_ALL", locale= "English")
+
+#Previously saved databases. They can also be loaded with the code in this markdown, but it is very slow. 
+#load("~/Protocolos de investigación/BASE COVID GOB/covid_mex/base_completa_per_reporting_date_sep_21.Rda")
+#load("~/Protocolos de investigación/BASE COVID GOB/covid_mex/uci_def_per_reporting_date_aug_31.Rda")
+#load("~/Protocolos de investigación/BASE COVID GOB/covid_mex/base_preliminar_estados_aug_31.Rda")
+```
+
+
+```{r Test sensitivity dataframe, include = F, eval = T, warning=F}
+#Here we create the database with the sensitivity of the test by day of symptoms. We use the analysis obtained by re-running the code of Kucirka et al. It will be used in all subsequent analyses.
+datos_jh <- main_analysis_25$plot_dat %>% 
+  mutate(sensibilidad_med = 1-fnr_med,
+         sensibilidad_lb = 1-fnr_ub,
+         sensibilidad_ub = 1-fnr_lb) %>% 
+  filter(days_since_exposure >= 5) %>% #The fifth day of exposure is the first day of symptoms
+  rename(dias_c_inf_ingreso=days_since_exposure)
+```
+
+
+```{r Per-reporting date country-level case estimation necessary df, include = F, eval = T, message = F, warning=F}
+num_31 <- c("01","02", "03", "04", "05", "06", "07", "08", "09", 10:31)
+num_30 <- c("01","02", "03", "04", "05", "06", "07", "08", "09", 10:30)
+num_21 <- c("01","02", "03", "04", "05", "06", "07", "08", "09", 10:21)
+
+
+
+bases_csv <- c(str_c("~/Protocolos de investigación/BASE COVID GOB/Bases de datos diarias/20",rep("04",19), seq(12,30,1) ,"COVID19MEXICO.csv"),
+                   str_c("~/Protocolos de investigación/BASE COVID GOB/Bases de datos diarias/20",rep("05",31), num_31 ,"COVID19MEXICO.csv"),
+                   str_c("~/Protocolos de investigación/BASE COVID GOB/Bases de datos diarias/20",rep("06",30), num_30 ,"COVID19MEXICO.csv"),
+                   str_c("~/Protocolos de investigación/BASE COVID GOB/Bases de datos diarias/20",rep("07",31), num_31 ,"COVID19MEXICO.csv"),
+                   str_c("~/Protocolos de investigación/BASE COVID GOB/Bases de datos diarias/20",rep("08",31), num_31 ,"COVID19MEXICO.csv"),
+                   str_c("~/Protocolos de investigación/BASE COVID GOB/Bases de datos diarias/20",rep("09",21), num_21 ,"COVID19MEXICO.csv")
+               )
+
+
+nombres_bases <- c(str_c("covid_abril_", 12:30),
+                   str_c("covid_mayo_", num_31),
+                   str_c("covid_junio_", num_30),
+                   str_c("covid_julio_", num_31),
+                   str_c("covid_agosto_", num_31),
+                   str_c("covid_septiembre_", num_21))
+
+nombres_bases_pendientes <- c(str_c("covid_abril_", 12:30, "_pendiente"),
+                   str_c("covid_mayo_", num_31,"_pendiente"),
+                   str_c("covid_junio_", num_30,"_pendiente"),
+                   str_c("covid_julio_", num_31,"_pendiente"),
+                   str_c("covid_agosto_", num_31,"_pendiente"),
+                   str_c("covid_septiembre_", num_21,"_pendiente"))
+
+nombres_bases_resultado <- c(str_c("covid_abril_", 12:30, "_resultado"),
+                   str_c("covid_mayo_", num_31,"_resultado"),
+                   str_c("covid_junio_", num_30,"_resultado"),
+                   str_c("covid_julio_", num_31,"_resultado"),
+                   str_c("covid_agosto_", num_31,"_resultado"),
+                   str_c("covid_septiembre_", num_21,"_resultado"))
+
+datos_jh_upper <- datos_jh
+names(datos_jh_upper) <- toupper(names(datos_jh))
+```
+
+
+```{r Per-reporting date country-level case estimation, include = F, eval = T, message = F, warning=F}
+#con esto obtengo la base del 12 de abril: el primer día que se puso a disponibilidad la base
+base_completa <-  read_csv(bases_csv[1]) %>% 
+  select(ID_REGISTRO,FECHA_ACTUALIZACION, FECHA_SINTOMAS, FECHA_INGRESO,FECHA_DEF,
+         UCI, RESULTADO) %>% 
+  filter(RESULTADO !=3  & FECHA_INGRESO >= "2020-02-27" & 
+           FECHA_INGRESO <= "2020-04-12"&
+           FECHA_INGRESO <= FECHA_ACTUALIZACION) %>% 
+  mutate(FECHA_CONTAGIO_5 = FECHA_SINTOMAS - 5,
+         DIAS_C_INF_INGRESO = as.double(FECHA_INGRESO - FECHA_CONTAGIO_5),
+         RESULTADO = ifelse(RESULTADO == 1, T, F),
+         FECHA_ACTUALIZACION = max(FECHA_INGRESO)) %>% 
+  filter(DIAS_C_INF_INGRESO <=25) %>% 
+  group_by(FECHA_INGRESO,DIAS_C_INF_INGRESO, RESULTADO) %>% 
+  summarise(NUM_PACIENTES = n())%>% 
+  full_join(select(datos_jh_upper,DIAS_C_INF_INGRESO,
+                   SENSIBILIDAD_MED:SENSIBILIDAD_UB), by = "DIAS_C_INF_INGRESO") %>% 
+  mutate(POSITIVOS_OFICIAL = ifelse(RESULTADO==T, NUM_PACIENTES, NA),
+         POSITIVOS_MED = ifelse(RESULTADO == T,
+                                round(NUM_PACIENTES/SENSIBILIDAD_MED,0), NA),
+         POSITIVOS_LB = ifelse(RESULTADO == T, 
+                               round(NUM_PACIENTES/SENSIBILIDAD_LB,0), NA),
+         POSITIVOS_UB = ifelse(RESULTADO == T,
+                               round(NUM_PACIENTES/SENSIBILIDAD_UB,0), NA),
+         NEGATIVOS_OFICIAL = ifelse(RESULTADO == F, NUM_PACIENTES, NA),
+         FALSOS_NEGATIVOS_MED = ifelse(RESULTADO == T,
+                                       round((NUM_PACIENTES/SENSIBILIDAD_MED)-NUM_PACIENTES,0), NA),
+         FALSOS_NEGATIVOS_LB = ifelse(RESULTADO == T, 
+                                      round((NUM_PACIENTES/SENSIBILIDAD_LB)-NUM_PACIENTES,0), NA),
+         FALSOS_NEGATIVOS_UB = ifelse(RESULTADO == T,
+                                      round((NUM_PACIENTES/SENSIBILIDAD_UB)-NUM_PACIENTES,0), NA),
+         FECHA_ACTUALIZACION = FECHA_INGRESO) %>% 
+  ungroup() %>% 
+  group_by(FECHA_ACTUALIZACION) %>% 
+  summarise(NEGATIVOS_OFICIAL = sum(NEGATIVOS_OFICIAL, na.rm = T),
+            POSITIVOS_OFICIAL = sum(POSITIVOS_OFICIAL, na.rm = T),
+            PRUEBAS_TOTALES = NEGATIVOS_OFICIAL + POSITIVOS_OFICIAL,
+            POSITIVOS_MED = sum(POSITIVOS_MED, na.rm = T),
+            POSITIVOS_LB = sum(POSITIVOS_LB, na.rm = T),
+            POSITIVOS_UB = sum(POSITIVOS_UB, na.rm = T),
+            FALSOS_NEGATIVOS_MED = sum(FALSOS_NEGATIVOS_MED, na.rm = T),
+            FALSOS_NEGATIVOS_LB = sum(FALSOS_NEGATIVOS_LB, na.rm = T),
+            FALSOS_NEGATIVOS_UB = sum(FALSOS_NEGATIVOS_UB, na.rm = T)) %>% 
+  ungroup() 
+
+#Here we obtain filter the patients whose result changes from "pending" to positive or negative on any given day. It is very slow code, highly recommend to save the resulting dataframe
+for(i in 2:length(nombres_bases)){
+  base_completa <- rbind(base_completa,read_csv(bases_csv[i]) %>% 
+                           select(ID_REGISTRO,FECHA_ACTUALIZACION, FECHA_SINTOMAS, FECHA_INGRESO,FECHA_DEF,
+                                  UCI, RESULTADO) %>% 
+                           anti_join(read_csv(bases_csv[as.integer(i-1)]) %>% 
+                                       select(ID_REGISTRO,FECHA_ACTUALIZACION, FECHA_SINTOMAS, FECHA_INGRESO,FECHA_DEF,
+                                              UCI, RESULTADO) %>% 
+                                       filter(RESULTADO != 3), by = "ID_REGISTRO") %>% 
+                           filter(RESULTADO !=3  & FECHA_INGRESO >= "2020-02-27" & FECHA_INGRESO <= "2020-09-21" & 
+                                    FECHA_INGRESO <= FECHA_ACTUALIZACION) %>% 
+                           mutate(FECHA_CONTAGIO_5 = FECHA_SINTOMAS - 5,
+                                  DIAS_C_INF_INGRESO = as.double(FECHA_INGRESO - FECHA_CONTAGIO_5),
+                                  RESULTADO = ifelse(RESULTADO == 1, T, F),
+                                  FECHA_ACTUALIZACION = 
+                                    if_else(FECHA_ACTUALIZACION == "2020-04-19", 
+                                            as.Date(str_c("2020-04-",num_30[i+11])),
+                                            FECHA_ACTUALIZACION)) %>% 
+                           filter(DIAS_C_INF_INGRESO <=25) %>% 
+                           group_by(FECHA_ACTUALIZACION, DIAS_C_INF_INGRESO, RESULTADO) %>% 
+                           summarise(NUM_PACIENTES = n()) %>% 
+                           full_join(select(datos_jh_upper,DIAS_C_INF_INGRESO,
+                                            SENSIBILIDAD_MED:SENSIBILIDAD_UB), by = "DIAS_C_INF_INGRESO") %>% 
+                           mutate(POSITIVOS_OFICIAL = ifelse(RESULTADO==T, NUM_PACIENTES, NA),
+                                  POSITIVOS_MED = ifelse(RESULTADO == T,
+                                                         round(NUM_PACIENTES/SENSIBILIDAD_MED,0), NA),
+                                  POSITIVOS_LB = ifelse(RESULTADO == T, 
+                                                        round(NUM_PACIENTES/SENSIBILIDAD_LB,0), NA),
+                                  POSITIVOS_UB = ifelse(RESULTADO == T,
+                                                        round(NUM_PACIENTES/SENSIBILIDAD_UB,0), NA),
+                                  NEGATIVOS_OFICIAL = ifelse(RESULTADO == F, NUM_PACIENTES, NA),
+                                  FALSOS_NEGATIVOS_MED = ifelse(RESULTADO == T,
+                                                                round((NUM_PACIENTES/SENSIBILIDAD_MED)-NUM_PACIENTES,0), NA),
+                                  FALSOS_NEGATIVOS_LB = ifelse(RESULTADO == T, 
+                                                               round((NUM_PACIENTES/SENSIBILIDAD_LB)-NUM_PACIENTES,0), NA),
+                                  FALSOS_NEGATIVOS_UB = ifelse(RESULTADO == T,
+                                                               round((NUM_PACIENTES/SENSIBILIDAD_UB)-NUM_PACIENTES,0), NA)) %>% 
+                           ungroup() %>% 
+                           summarise(FECHA_ACTUALIZACION = median(FECHA_ACTUALIZACION,na.rm = T),
+                                     NEGATIVOS_OFICIAL = sum(NEGATIVOS_OFICIAL, na.rm = T),
+                                     POSITIVOS_OFICIAL = sum(POSITIVOS_OFICIAL, na.rm = T),
+                                     PRUEBAS_TOTALES = NEGATIVOS_OFICIAL + POSITIVOS_OFICIAL,
+                                     POSITIVOS_MED = sum(POSITIVOS_MED, na.rm = T),
+                                     POSITIVOS_LB = sum(POSITIVOS_LB, na.rm = T),
+                                     POSITIVOS_UB = sum(POSITIVOS_UB, na.rm = T),
+                                     FALSOS_NEGATIVOS_MED = sum(FALSOS_NEGATIVOS_MED, na.rm = T),
+                                     FALSOS_NEGATIVOS_LB = sum(FALSOS_NEGATIVOS_LB, na.rm = T),
+                                     FALSOS_NEGATIVOS_UB = sum(FALSOS_NEGATIVOS_UB, na.rm = T)))
+}
+
+base_completa_per_reporting_date <- base_completa %>% 
+  mutate(PRUEBAS_TOTALES_ACUM = cumsum(PRUEBAS_TOTALES),
+         PRUEBAS_POS_OFICIAL_ACUM = cumsum(POSITIVOS_OFICIAL),
+         PRUEBAS_POS_MED_ACUM = cumsum(POSITIVOS_MED),
+         PRUEBAS_POS_LB_ACUM = cumsum(POSITIVOS_LB),
+         PRUEBAS_POS_UB_ACUM = cumsum(POSITIVOS_UB),
+         PRUEBAS_NEG_OFICIAL_ACUM = cumsum(NEGATIVOS_OFICIAL),
+         PRUEBAS_NEG_MED_ACUM = cumsum(NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_MED),
+         PRUEBAS_NEG_LB_ACUM = cumsum(NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_LB),
+         PRUEBAS_NEG_UB_ACUM = cumsum(NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_UB),
+         PRUEBAS_NEG_MED = NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_MED,
+         PRUEBAS_NEG_LB = NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_LB,
+         PRUEBAS_NEG_UB = NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_UB,
+         FALSOS_NEG_MED_ACUM = cumsum(FALSOS_NEGATIVOS_MED),
+         FALSOS_NEG_LB_ACUM = cumsum(FALSOS_NEGATIVOS_LB),
+         FALSOS_NEG_UB_ACUM = cumsum(FALSOS_NEGATIVOS_UB),
+         PROPORCION_POSITIVOS_OFICIAL = round((POSITIVOS_OFICIAL/PRUEBAS_TOTALES),3),
+         PROPORCION_POSITIVOS_MED = round((POSITIVOS_MED/PRUEBAS_TOTALES),3),
+         PROPORCION_POSITIVOS_UB= round((POSITIVOS_UB/PRUEBAS_TOTALES),3),
+         PROPORCION_POSITIVOS_LB = round((POSITIVOS_LB/PRUEBAS_TOTALES),3)) %>% 
+  filter(!is.na(FECHA_ACTUALIZACION))
+         
+names(base_completa_per_reporting_date) <- tolower(names(base_completa_per_reporting_date))
+
+#Higly recommend saving this data.frame to avoid repeating code unless strictly necessary (eg. changing the study dates)
+#save(base_completa_per_reporting_date, file = "base_completa_per_reporting_date_sep_21.Rda")
+#load("~/Protocolos de investigación/BASE COVID GOB/covid_mex/base_completa_per_reporting_date_sep_21.Rda")
+
+
+
+#Number of tests
+sum(base_completa_per_reporting_date$pruebas_totales)
+#Total cases reported up to September 21st, 2020 according to different test sensitivities
+last(base_completa_per_reporting_date$pruebas_pos_med_acum)
+last(base_completa_per_reporting_date$pruebas_pos_ub_acum)
+last(base_completa_per_reporting_date$pruebas_pos_lb_acum)
+last(base_completa_per_reporting_date$pruebas_pos_oficial_acum)
+
+#Date at which 50,000 cases were first reached
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$pruebas_pos_med_acum >=50000][1];
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$pruebas_pos_ub_acum >=50000][1]; 
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$pruebas_pos_lb_acum >=50000][1];
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$pruebas_pos_oficial_acum >=50000][1]
+
+#Date at which 50% positivity rate was first reached
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$proporcion_positivos_med >=0.5][1];
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$proporcion_positivos_ub >=0.5][1]; 
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$proporcion_positivos_lb >=0.5][1]; 
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$proporcion_positivos_oficial >=0.5][1]
+```
+
+Falta correr lo que está abajo de esto
+```{r Per-reporting date country-wide ICU admission and deaths estimation, echo=F, eval = T, message = F, warning=F}
+base_uci_defunciones_diario <- read_csv(bases_csv[1]) %>% 
+  mutate(FECHA_CONTAGIO_5 = FECHA_SINTOMAS - 5,
+         DIAS_C_INF_INGRESO = as.double(FECHA_INGRESO - FECHA_CONTAGIO_5)) %>% 
+  filter(RESULTADO !=3  & FECHA_INGRESO >= "2020-02-27" & FECHA_INGRESO <= "2020-09-21" & DIAS_C_INF_INGRESO <=25) %>% 
+  select(FECHA_ACTUALIZACION, ID_REGISTRO, RESULTADO, FECHA_DEF,
+         UCI) %>% 
+    mutate(UCI = ifelse(UCI == 1, T, F),
+           DEFUNCION = if_else(!is.na(FECHA_DEF), T, F),
+           FECHA_ACTUALIZACION = ymd("2020-04-13"),
+           RESULTADO = if_else(RESULTADO == 1, T, F)) %>% 
+    group_by(FECHA_ACTUALIZACION, RESULTADO) %>% 
+    summarise(UCI = sum(UCI, na.rm = T),
+              DEFUNCION = sum(DEFUNCION, na.rm = T)) %>% 
+  ungroup()
+
+#Daily reported ICU admissions and deaths in the same data.frame. Slow code, highly recommend to save this data.frame for posterior use
+for(i in seq_along(nombres_bases)){ 
+  base_uci_defunciones_diario <- rbind(base_uci_defunciones_diario,read_csv(bases_csv[i]) %>% 
+  mutate(FECHA_CONTAGIO_5 = FECHA_SINTOMAS - 5,
+         DIAS_C_INF_INGRESO = as.double(FECHA_INGRESO - FECHA_CONTAGIO_5)) %>% 
+  filter(RESULTADO !=3  & FECHA_INGRESO >= "2020-02-27" & FECHA_INGRESO <= "2020-09-21" & DIAS_C_INF_INGRESO <=25) %>% 
+  select(FECHA_ACTUALIZACION, ID_REGISTRO, RESULTADO, FECHA_DEF,
+         UCI) %>% 
+    mutate(UCI = ifelse(UCI == 1, T, F),
+           DEFUNCION = if_else(!is.na(FECHA_DEF), T, F),
+           FECHA_ACTUALIZACION = if_else(FECHA_ACTUALIZACION == "2020-04-19", 
+                                            as.Date(str_c("2020-04-",num_30[i+11])),
+                                            FECHA_ACTUALIZACION),
+           RESULTADO = if_else(RESULTADO == 1, T, F)) %>% 
+    group_by(FECHA_ACTUALIZACION, RESULTADO) %>% 
+    summarise(UCI = sum(UCI, na.rm = T),
+              DEFUNCION = sum(DEFUNCION, na.rm = T)) %>% 
+  ungroup())
+  }
+
+uci_conteo_pos <- c( arrange(base_uci_defunciones_diario, desc(FECHA_ACTUALIZACION))$UCI[base_uci_defunciones_diario$RESULTADO == T],0)[-1]
+def_conteo_pos <- c( arrange(base_uci_defunciones_diario, desc(FECHA_ACTUALIZACION))$DEFUNCION[base_uci_defunciones_diario$RESULTADO == T],0)[-1]
+
+uci_conteo_neg <- c( arrange(base_uci_defunciones_diario, desc(FECHA_ACTUALIZACION))$UCI[base_uci_defunciones_diario$RESULTADO == F],0)[-1]
+def_conteo_neg <- c( arrange(base_uci_defunciones_diario, desc(FECHA_ACTUALIZACION))$DEFUNCION[base_uci_defunciones_diario$RESULTADO == F],0)[-1]
+
+
+
+names(base_uci_defunciones_diario) <- tolower(names(base_uci_defunciones_diario))
+
+
+uci_def_per_reporting_date <- filter(base_uci_defunciones_diario, resultado == T) %>% 
+  arrange(desc(fecha_actualizacion)) %>% 
+  mutate(uci_dia = uci-uci_conteo_pos,
+         defuncion_dia = defuncion-def_conteo_pos) %>% 
+  full_join(filter(base_uci_defunciones_diario, resultado == F) %>% 
+  arrange(desc(fecha_actualizacion)) %>% 
+  mutate(uci_dia = uci-uci_conteo_neg,
+         defuncion_dia = defuncion-def_conteo_neg) %>%  
+  full_join(base_completa_per_reporting_date %>% 
+              mutate(prop_fn_med = round(falsos_negativos_med/negativos_oficial,2),
+                     prop_fn_lb = round(falsos_negativos_lb/negativos_oficial,2),
+                     prop_fn_ub = round(falsos_negativos_ub/negativos_oficial,2)),
+            by = "fecha_actualizacion") %>% 
+  mutate(uci_dia_med = round(prop_fn_med*uci_dia),
+         uci_dia_lb = round(prop_fn_lb*uci_dia),
+         uci_dia_ub = round(prop_fn_ub*uci_dia),
+         defuncion_dia_med = round(prop_fn_med*defuncion_dia),
+         defuncion_dia_lb = round(prop_fn_lb*defuncion_dia),
+         defuncion_dia_ub = round(prop_fn_ub*defuncion_dia),) %>% 
+    select(fecha_actualizacion,prop_fn_med, prop_fn_lb, prop_fn_ub,
+           uci_dia_med, uci_dia_lb, uci_dia_ub, defuncion_dia_med, defuncion_dia_lb, defuncion_dia_ub),
+  by = "fecha_actualizacion") %>% 
+  mutate(uci_dia_total_med = uci_dia + uci_dia_med,
+         uci_dia_total_lb = uci_dia + uci_dia_lb,
+         uci_total_dia_ub= uci_dia + uci_dia_ub,
+         defuncion_dia_total_med = defuncion_dia + defuncion_dia_med,
+         defuncion_dia_total_lb = defuncion_dia + defuncion_dia_lb,
+         defuncion_dia_total_ub = defuncion_dia + defuncion_dia_ub)
+
+#save(uci_def_per_reporting_date, file = "uci_def_per_reporting_date_sep_21.Rda")
+```
+
+
+```{r Table 1: Per-reporting date country-level estimates, echo = F, eval = T, warning = F}
+fechas_tabla_1 <- data.frame(fechas_nombre = c(str_c(lubridate::month(seq.Date(from=as.Date("2020-04-13"), 
+                                     to =as.Date("2020-09-21"),by = 7),label = TRUE, abbr = F),
+                      " ",
+                      lubridate::day(seq.Date(from=as.Date("2020-04-13"), 
+                                     to =as.Date("2020-09-21"),by = 7))),"September 21"),
+                      fechas = c(seq.Date(from=as.Date("2020-04-13"), 
+                                     to =as.Date("2020-09-21"), by = 7),ymd("2020-09-21")))
+
+fechas_t1 <- as.character(fechas_tabla_1$fechas_nombre)
+
+
+nombres_variables_tabla_1 <- c("N",
+                       "Positive tests",
+                       "Negative tests",
+                       "Estimated false negative tests",
+                       "Overall ICU count",
+                       "Overall Death count")
+
+tabla_1_df <- data.frame(Variables = nombres_variables_tabla_1,
+          Official_government_count = c(sum(base_completa_per_reporting_date$pruebas_totales), 
+                                        str_c(sum(base_completa_per_reporting_date$positivos_oficial, 
+                                                  na.rm = T), " (", 
+                                  round(sum(base_completa_per_reporting_date$positivos_oficial, 
+                                      na.rm = T)/sum(base_completa_per_reporting_date$pruebas_totales, 
+                                                     na.rm = T)*100,1),"%)"),
+                                  str_c(sum(base_completa_per_reporting_date$negativos_oficial, na.rm = T)," (",
+                                      round(sum(base_completa_per_reporting_date$negativos_oficial, 
+                                          na.rm = T)/sum(base_completa_per_reporting_date$pruebas_totales, 
+                                                         na.rm = T)*100,1),"%)"), 
+                                  NA,
+                                  sum(uci_def_per_reporting_date$uci_dia, na.rm = T),
+                                  sum(uci_def_per_reporting_date$defuncion_dia, na.rm = T)),
+          Average_test_pos_percent = c(sum(base_completa_per_reporting_date$pruebas_totales), 
+                            str_c(sum(base_completa_per_reporting_date$positivos_med, na.rm = T), " (", 
+                                  round(sum(base_completa_per_reporting_date$positivos_med, 
+                                      na.rm = T)/sum(base_completa_per_reporting_date$pruebas_totales,
+                                                     na.rm = T)*100,1),"%)"),
+                                  str_c(sum(base_completa_per_reporting_date$pruebas_neg_med, na.rm = T)," (",
+                                      round(sum(base_completa_per_reporting_date$pruebas_neg_med, 
+                                          na.rm = T)/sum(base_completa_per_reporting_date$pruebas_totales,
+                                                         na.rm = T)*100,1),"%)"),  
+                                  str_c(sum(base_completa_per_reporting_date$falsos_negativos_med, na.rm = T)," (",
+                                        round(sum(base_completa_per_reporting_date$falsos_negativos_med, na.rm = T)/
+                                          sum(base_completa_per_reporting_date$pruebas_totales, 
+                                              na.rm = T)*100,1),"%)"),
+                                  sum(uci_def_per_reporting_date$uci_dia_total_med, na.rm = T),
+                                  sum(uci_def_per_reporting_date$defuncion_dia_total_med, na.rm = T)),
+          Best_test_pos_percent = c(sum(base_completa_per_reporting_date$pruebas_totales), 
+                            str_c(sum(base_completa_per_reporting_date$positivos_ub, na.rm = T), " (", 
+                                  round(sum(base_completa_per_reporting_date$positivos_ub, 
+                                      na.rm = T)/sum(base_completa_per_reporting_date$pruebas_totales,
+                                                     na.rm = T)*100,1),"%)"),
+                                  str_c(sum(base_completa_per_reporting_date$pruebas_neg_ub, na.rm = T)," (",
+                                      round(sum(base_completa_per_reporting_date$pruebas_neg_ub, 
+                                          na.rm = T)/sum(base_completa_per_reporting_date$pruebas_totales,
+                                                         na.rm = T)*100,1),"%)"),  
+                                  str_c(sum(base_completa_per_reporting_date$falsos_negativos_ub, na.rm = T)," (",
+                                        round(sum(base_completa_per_reporting_date$falsos_negativos_ub, na.rm = T)/
+                                          sum(base_completa_per_reporting_date$pruebas_totales,
+                                              na.rm = T)*100,1),"%)"),
+                                  sum(uci_def_per_reporting_date$uci_total_dia_ub, na.rm = T),
+                                  sum(uci_def_per_reporting_date$defuncion_dia_total_ub, na.rm = T)),
+          Worst_test_pos_percent = c(sum(base_completa_per_reporting_date$pruebas_totales), 
+                            str_c(sum(base_completa_per_reporting_date$positivos_lb, na.rm = T), " (", 
+                                  round(sum(base_completa_per_reporting_date$positivos_lb, 
+                                      na.rm = T)/sum(base_completa_per_reporting_date$pruebas_totales, 
+                                                     na.rm = T)*100,1),"%)"),
+                                  str_c(sum(base_completa_per_reporting_date$pruebas_neg_lb, na.rm = T)," (",
+                                      round(sum(base_completa_per_reporting_date$pruebas_neg_lb, 
+                                          na.rm = T)/sum(base_completa_per_reporting_date$pruebas_totales, 
+                                                         na.rm = T)*100,1),"%)"),  
+                                  str_c(sum(base_completa_per_reporting_date$falsos_negativos_lb, na.rm = T)," (",
+                                        round(sum(base_completa_per_reporting_date$falsos_negativos_lb, na.rm = T)/
+                                          sum(base_completa_per_reporting_date$pruebas_totales, 
+                                              na.rm = T)*100,1),"%)"),
+                                  sum(uci_def_per_reporting_date$uci_dia_total_lb, na.rm = T),
+                                  sum(uci_def_per_reporting_date$defuncion_dia_total_lb, na.rm = T))) %>% 
+  rename("Official count" = Official_government_count,
+         "Average test estimates" = Average_test_pos_percent,
+         "Best test estimates" = Best_test_pos_percent,
+         "Worst test estimates" = Worst_test_pos_percent)
+
+
+
+
+flextable(tabla_1_df, cwidth = 2)
+```
+
+
+```{r Per-reporting date country-wide graphs, echo = F, eval = T}
+# Daily nation-wide COVID cases by reporting date with false negatives
+casos_diarios_reportados_c_fn <- ggplot(filter(base_completa_per_reporting_date,fecha_actualizacion >="2020-04-13"),
+                                        aes(x = fecha_actualizacion, 
+                                                     y=pruebas_totales, 
+                                                     fill = str_c("True negative (total = ", last(pruebas_neg_med_acum),")"))) + 
+  geom_area()+
+  geom_area(aes(y = positivos_med, 
+               fill = str_c("False negative (total = ", 
+                                     last(falsos_neg_med_acum), ")")))+
+  geom_area(aes(y = positivos_oficial, 
+               fill = str_c("Official positive (total = ", last(pruebas_pos_oficial_acum), ")")))+
+  labs(y = "Number of tests",
+       x = "Date",
+       fill = str_c("Test result (total tests = ", sum(base_completa_per_reporting_date$pruebas_totales), ")"))+
+  scale_fill_manual(breaks = c(str_c("True negative (total = ", 
+                                     last(base_completa_per_reporting_date$pruebas_neg_med_acum),")"),
+                               str_c("False negative (total = ", 
+                                     last(base_completa_per_reporting_date$falsos_neg_med_acum), ")"),
+                               str_c("Official positive (total = ", 
+                                     last(base_completa_per_reporting_date$pruebas_pos_oficial_acum), ")")),
+                    values=c("deepskyblue4", "gray50", "darkorange2"))+
+  scale_y_continuous(breaks = seq(0,17500,2500))+
+  scale_x_date(date_breaks = "1 week",
+               date_labels ="%B %d",
+               expand = c(0.03, 0.03))+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90, vjust = .25, hjust = 0.95, size = 14, face = "bold"),
+        axis.title = element_text(size = 14, face = "bold"),
+        axis.ticks = element_line(size = 1, colour = "black"),
+        axis.title.y = element_text(face = "bold", size = 14),
+        axis.text.y = element_text(size = 14, face = "bold"),
+        legend.position = "none",
+        plot.title = element_text(size = 14, face = "bold"))
+
+# Accumulated nation-wide COVID cases by reporting date with false negatives
+casos_diarios_acumulados_c_fn <- ggplot(filter(base_completa_per_reporting_date,fecha_actualizacion >="2020-04-13"),
+                                   aes(x = fecha_actualizacion, y=pruebas_totales_acum,
+                                                     fill = str_c("True negative (total = ", last(pruebas_neg_med_acum),")"))) + 
+  geom_area()+
+  geom_area(aes(y = pruebas_pos_med_acum, 
+               fill = str_c("False negative (total = ", 
+                                     last(falsos_neg_med_acum), ")")))+
+  geom_area(aes(y = pruebas_pos_oficial_acum, 
+               fill = str_c("Official positive (total = ", 
+                                     last(base_completa_per_reporting_date$pruebas_pos_oficial_acum), ")")))+
+  labs(x = "Date",
+       y = "Number of tests",
+       fill = str_c("Test result (total tests = ", sum(base_completa_per_reporting_date$pruebas_totales), ")"))+
+  scale_fill_manual(breaks = c(str_c("True negative (total = ", last(base_completa_per_reporting_date$pruebas_neg_med_acum),")"),
+                               str_c("False negative (total = ", 
+                                     last(base_completa_per_reporting_date$falsos_neg_med_acum), ")"),
+                               str_c("Official positive (total = ", 
+                                     last(base_completa_per_reporting_date$pruebas_pos_oficial_acum), ")")),
+                    values=c("deepskyblue4", "gray50", "darkorange2"))+
+  scale_y_continuous(breaks = seq(0, 1600000, 100000))+
+  scale_x_date(date_breaks = "1 week",
+               date_labels ="%B %d",
+               expand = c(0.03, 0.03))+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90, vjust = .25, hjust = 0.95, size = 14, face = "bold"),
+        axis.title = element_text(size = 14, face = "bold"),
+        axis.ticks = element_line(size = 1, colour = "black"),
+        axis.title.y = element_text(face = "bold", size = 14),
+        axis.text.y = element_text(size = 14, face = "bold"),
+        legend.position = c(0.35, 0.7),
+        legend.title = element_text(size = 14, face = "bold"),
+        legend.text = element_text(size = 14),
+        legend.key.size = unit(.5,"cm"),
+        plot.title = element_text(size = 14, face = "bold"))
+
+casos_diarios_reportados_c_fn+casos_diarios_acumulados_c_fn+
+  plot_annotation(tag_levels = "A",
+                  title = "Figure 1. Estimated proportion of tested individuals with a false negative result during the study period",
+                  caption = "'A' represents new daily test results, 'B' represents accumulated test results. Study period from February 27th - September 21st, shown from April 13th.")&
+  theme(title = element_text(size = 14, face = "bold"),
+        plot.caption = element_text(size = 10, face = "bold"))
+
+
+```
+
+
+```{r df for per state analysis, include = F, eval = T, warning = F, message = F}
+entidades_df <- data.frame(entidad = tolower(c("AGUASCALIENTES", "BAJA_CALIFORNIA", "BAJA_CALIFORNIA_SUR", "CAMPECHE", "COAHUILA",
+                                          "COLIMA","CHIAPAS","CHIHUAHUA", "CDMX","DURANGO","GUANAJUATO","GUERRERO","HIDALGO","JALISCO","EDOMX",
+                                          "MICHOACAN","MORELOS","NAYARIT","NUEVO_LEON","OAXACA","PUEBLA","QUERETARO", "QUINTANA_ROO","SAN_LUIS_POTOSI",
+                                          "SINALOA","SONORA","TABASCO","TAMAULIPAS","TLAXCALA","VERACRUZ","YUCATAN","ZACATECAS",
+                                          "ESTADOS_UNIDOS_MEXICANOS", "NO_APLICA", "SE_IGNORA", "NO_ESPECIFICADO")),
+                      entidad_um = 
+                        as.character(c("01", "02", "03", "04", "05", "06", "07", "08", "09", 10:32,36,97:99)),
+                      poblacion = c(1312544, 3315766, 712029, 899931, 2954915, 711235,
+                                    5217908, 3556574, 8918653, 1754754, 5853677, 3533251,
+                                    2858359, 7844830, 16187608, 4584471, 1903811, 1181050,
+                                    5119504, 3967889, 6168883, 2038372, 1501562, 2717820,
+                                    2966321, 2850330, 2395272, 3441698, 1272847, 8112505,
+                                    2097175, 1579209, NA, NA, NA, NA))
+
+
+entidades_df_res <- entidades_df[1:32,]
+fecha_actualizacion <- seq.Date(from = ymd("2020-04-13"), to = ymd("2020-09-21"), by = 1)
+```
+
+
+```{r Per-reporting date by-state estimation, include = F, eval = T, warning = F, message = F}
+base_preliminar_estados <-  read_csv(bases_csv[1]) %>% 
+  select(ID_REGISTRO,FECHA_ACTUALIZACION, FECHA_SINTOMAS, FECHA_INGRESO,FECHA_DEF,
+         UCI, RESULTADO, ENTIDAD_UM) %>% 
+  filter(RESULTADO !=3  & FECHA_INGRESO >= "2020-02-27" & FECHA_INGRESO <= "2020-09-21" &
+           FECHA_INGRESO <= FECHA_ACTUALIZACION) %>% 
+  mutate(FECHA_CONTAGIO_5 = FECHA_SINTOMAS - 5,
+         DIAS_C_INF_INGRESO = as.double(FECHA_INGRESO - FECHA_CONTAGIO_5),
+         RESULTADO = ifelse(RESULTADO == 1, T, F),
+         FECHA_ACTUALIZACION = max(FECHA_INGRESO),
+         UCI_TOTAL = ifelse(UCI == 1, T, F),
+         UCI_POS = ifelse(RESULTADO == T & UCI == 1, T, F),
+         UCI_NEG = ifelse(RESULTADO == F & UCI == 1, T, F),
+         DEFUNCION_TOTAL = ifelse(!is.na(FECHA_DEF), T, F),
+         DEFUNCION_POS = ifelse(RESULTADO ==T & !is.na(FECHA_DEF), T, F),
+         DEFUNCION_NEG = ifelse(RESULTADO ==T & !is.na(FECHA_DEF), T, F)) %>% 
+  filter(DIAS_C_INF_INGRESO <=25) %>% 
+  group_by(ENTIDAD_UM,FECHA_INGRESO,DIAS_C_INF_INGRESO, RESULTADO) %>% 
+  summarise(NUM_PACIENTES = n(),
+            NUM_UCI_TOTAL = sum(UCI_TOTAL, na.rm = T),
+            NUM_UCI_POS = sum(UCI_POS, na.rm = T),
+            NUM_UCI_NEG = sum(UCI_NEG, na.rm = T),
+            NUM_DEF_TOTAL = sum(DEFUNCION_TOTAL, na.rm = T),
+            NUM_DEF_POS = sum(DEFUNCION_POS, na.rm = T),
+            NUM_DEF_NEG = sum(DEFUNCION_NEG, na.rm = T)) %>% 
+  full_join(select(datos_jh_upper,DIAS_C_INF_INGRESO,
+                   SENSIBILIDAD_MED:SENSIBILIDAD_UB), by = "DIAS_C_INF_INGRESO") %>% 
+  mutate(POSITIVOS_OFICIAL = ifelse(RESULTADO==T, NUM_PACIENTES, NA),
+         POSITIVOS_MED = ifelse(RESULTADO == T,
+                                round(NUM_PACIENTES/SENSIBILIDAD_MED,0), NA),
+         POSITIVOS_LB = ifelse(RESULTADO == T, 
+                               round(NUM_PACIENTES/SENSIBILIDAD_LB,0), NA),
+         POSITIVOS_UB = ifelse(RESULTADO == T,
+                               round(NUM_PACIENTES/SENSIBILIDAD_UB,0), NA),
+         NEGATIVOS_OFICIAL = ifelse(RESULTADO == F, NUM_PACIENTES, NA),
+         FALSOS_NEGATIVOS_MED = ifelse(RESULTADO == T,
+                                       round((NUM_PACIENTES/SENSIBILIDAD_MED)-NUM_PACIENTES,0), NA),
+         FALSOS_NEGATIVOS_LB = ifelse(RESULTADO == T, 
+                                      round((NUM_PACIENTES/SENSIBILIDAD_LB)-NUM_PACIENTES,0), NA),
+         FALSOS_NEGATIVOS_UB = ifelse(RESULTADO == T,
+                                      round((NUM_PACIENTES/SENSIBILIDAD_UB)-NUM_PACIENTES,0), NA),
+         FECHA_ACTUALIZACION = FECHA_INGRESO) %>% 
+  ungroup() %>% 
+  group_by(ENTIDAD_UM) %>% 
+  summarise(NEGATIVOS_OFICIAL = sum(NEGATIVOS_OFICIAL, na.rm = T),
+            POSITIVOS_OFICIAL = sum(POSITIVOS_OFICIAL, na.rm = T),
+            PRUEBAS_TOTALES = NEGATIVOS_OFICIAL + POSITIVOS_OFICIAL,
+            POSITIVOS_MED = sum(POSITIVOS_MED, na.rm = T),
+            POSITIVOS_LB = sum(POSITIVOS_LB, na.rm = T),
+            POSITIVOS_UB = sum(POSITIVOS_UB, na.rm = T),
+            FALSOS_NEGATIVOS_MED = sum(FALSOS_NEGATIVOS_MED, na.rm = T),
+            FALSOS_NEGATIVOS_LB = sum(FALSOS_NEGATIVOS_LB, na.rm = T),
+            FALSOS_NEGATIVOS_UB = sum(FALSOS_NEGATIVOS_UB, na.rm = T),
+            NEG_TOTAL_MED = NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_MED,
+            NEG_TOTAL_LB = NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_LB,
+            NEG_TOTAL_UB = NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_UB,
+            PROP_FN_MED = if_else(NEGATIVOS_OFICIAL > 0, 
+                                  round(FALSOS_NEGATIVOS_MED/NEGATIVOS_OFICIAL,3), 0),
+            PROP_FN_LB = if_else(NEGATIVOS_OFICIAL >0, 
+                                 round(FALSOS_NEGATIVOS_LB/NEGATIVOS_OFICIAL,3), 0),
+            PROP_FN_UB = if_else(NEGATIVOS_OFICIAL >0,
+                                 round(FALSOS_NEGATIVOS_UB/NEGATIVOS_OFICIAL,3), 0),
+            POSITIVOS_OFICIAL_ACUM = cumsum(POSITIVOS_OFICIAL),
+            NEGATIVOS_OFICIAL_ACUM = cumsum(NEGATIVOS_OFICIAL),
+            PRUEBAS_TOTALES_ACUM = cumsum(PRUEBAS_TOTALES),
+            PRUEBAS_NEG_OFICIAL_ACUM = cumsum(NEGATIVOS_OFICIAL),
+            FALSOS_NEG_MED_ACUM = cumsum(FALSOS_NEGATIVOS_MED),
+            POSITIVOS_MED_ACUM = cumsum(POSITIVOS_MED),
+            POS_FN_ACUM = FALSOS_NEG_MED_ACUM + POSITIVOS_OFICIAL_ACUM,
+            NUM_UCI_TOTAL = sum(NUM_UCI_TOTAL, na.rm = T),
+            NUM_UCI_POS = sum(NUM_UCI_POS, na.rm = T),
+            NUM_UCI_NEG = sum(NUM_UCI_NEG, na.rm = T),
+            NUM_UCI_MED = round(NUM_UCI_POS + (PROP_FN_MED * NUM_UCI_NEG),0),
+            NUM_UCI_LB = round(NUM_UCI_POS + (PROP_FN_LB * NUM_UCI_NEG),0),
+            NUM_UCI_UB = round(NUM_UCI_POS + (PROP_FN_UB * NUM_UCI_NEG),0),
+            NUM_DEF_TOTAL = sum(NUM_DEF_TOTAL, na.rm = T),
+            NUM_DEF_POS = sum(NUM_DEF_POS, na.rm = T),
+            NUM_DEF_NEG = sum(NUM_DEF_NEG, na.rm = T),
+            NUM_DEF_MED = round(NUM_DEF_POS + (PROP_FN_MED * NUM_DEF_NEG),0),
+            NUM_DEF_LB = round(NUM_DEF_POS + (PROP_FN_LB * NUM_DEF_NEG),0),
+            NUM_DEF_UB = round(NUM_DEF_POS + (PROP_FN_UB * NUM_DEF_NEG),0)) %>% 
+  ungroup() %>% 
+  mutate(FECHA_ACTUALIZACION = ymd("2020-04-12"))
+
+for(i in 2:length(nombres_bases)){
+  base_preliminar_estados <- rbind(base_preliminar_estados, as.data.table(read_csv(bases_csv[i])) %>% 
+                                     select(ID_REGISTRO,FECHA_ACTUALIZACION, FECHA_SINTOMAS, FECHA_INGRESO,FECHA_DEF,
+                                            UCI, RESULTADO, ENTIDAD_UM) %>% 
+                                     filter(RESULTADO !=3  & FECHA_INGRESO >= "2020-02-27" & FECHA_INGRESO <= "2020-09-21" &
+                                              FECHA_INGRESO <= FECHA_ACTUALIZACION) %>% 
+                                     anti_join(as.data.table(read_csv(bases_csv[i-1])) %>% filter(RESULTADO != 3), by = "ID_REGISTRO") %>% 
+                                     mutate(FECHA_CONTAGIO_5 = FECHA_SINTOMAS - 5,
+                                            DIAS_C_INF_INGRESO = as.double(FECHA_INGRESO - FECHA_CONTAGIO_5),
+                                            RESULTADO = ifelse(RESULTADO == 1, T, F),
+                                            FECHA_ACTUALIZACION = max(FECHA_INGRESO),
+                                            UCI_TOTAL = ifelse(UCI == 1, T, F),
+                                            UCI_POS = ifelse(RESULTADO == T & UCI == 1, T, F),
+                                            UCI_NEG = ifelse(RESULTADO == F & UCI == 1, T, F),
+                                            DEFUNCION_TOTAL = ifelse(!is.na(FECHA_DEF), T, F),
+                                            DEFUNCION_POS = ifelse(RESULTADO ==T & !is.na(FECHA_DEF), T, F),
+                                            DEFUNCION_NEG = ifelse(RESULTADO ==T & !is.na(FECHA_DEF), T, F)) %>% 
+                                     filter(DIAS_C_INF_INGRESO <=25) %>% 
+                                     group_by(ENTIDAD_UM,FECHA_INGRESO,DIAS_C_INF_INGRESO, RESULTADO) %>% 
+                                     summarise(NUM_PACIENTES = n(),
+                                               NUM_UCI_TOTAL = sum(UCI_TOTAL, na.rm = T),
+                                               NUM_UCI_POS = sum(UCI_POS, na.rm = T),
+                                               NUM_UCI_NEG = sum(UCI_NEG, na.rm = T),
+                                               NUM_DEF_TOTAL = sum(DEFUNCION_TOTAL, na.rm = T),
+                                               NUM_DEF_POS = sum(DEFUNCION_POS, na.rm = T),
+                                               NUM_DEF_NEG = sum(DEFUNCION_NEG, na.rm = T)) %>% 
+                                     full_join(select(datos_jh_upper,DIAS_C_INF_INGRESO,
+                                                      SENSIBILIDAD_MED:SENSIBILIDAD_UB), by = "DIAS_C_INF_INGRESO") %>% 
+                                     mutate(POSITIVOS_OFICIAL = ifelse(RESULTADO==T, NUM_PACIENTES, NA),
+                                            POSITIVOS_MED = ifelse(RESULTADO == T,
+                                                                   round(NUM_PACIENTES/SENSIBILIDAD_MED,0), NA),
+                                            POSITIVOS_LB = ifelse(RESULTADO == T, 
+                                                                  round(NUM_PACIENTES/SENSIBILIDAD_LB,0), NA),
+                                            POSITIVOS_UB = ifelse(RESULTADO == T,
+                                                                  round(NUM_PACIENTES/SENSIBILIDAD_UB,0), NA),
+                                            NEGATIVOS_OFICIAL = ifelse(RESULTADO == F, NUM_PACIENTES, NA),
+                                            FALSOS_NEGATIVOS_MED = ifelse(RESULTADO == T,
+                                                                          round((NUM_PACIENTES/SENSIBILIDAD_MED)-NUM_PACIENTES,0), NA),
+                                            FALSOS_NEGATIVOS_LB = ifelse(RESULTADO == T, 
+                                                                         round((NUM_PACIENTES/SENSIBILIDAD_LB)-NUM_PACIENTES,0), NA),
+                                            FALSOS_NEGATIVOS_UB = ifelse(RESULTADO == T,
+                                                                         round((NUM_PACIENTES/SENSIBILIDAD_UB)-NUM_PACIENTES,0), NA),
+                                            FECHA_ACTUALIZACION = FECHA_INGRESO) %>% 
+                                     ungroup() %>% 
+                                     group_by(ENTIDAD_UM) %>% 
+                                     summarise(NEGATIVOS_OFICIAL = sum(NEGATIVOS_OFICIAL, na.rm = T),
+                                               POSITIVOS_OFICIAL = sum(POSITIVOS_OFICIAL, na.rm = T),
+                                               PRUEBAS_TOTALES = NEGATIVOS_OFICIAL + POSITIVOS_OFICIAL,
+                                               POSITIVOS_MED = sum(POSITIVOS_MED, na.rm = T),
+                                               POSITIVOS_LB = sum(POSITIVOS_LB, na.rm = T),
+                                               POSITIVOS_UB = sum(POSITIVOS_UB, na.rm = T),
+                                               FALSOS_NEGATIVOS_MED = sum(FALSOS_NEGATIVOS_MED, na.rm = T),
+                                               FALSOS_NEGATIVOS_LB = sum(FALSOS_NEGATIVOS_LB, na.rm = T),
+                                               FALSOS_NEGATIVOS_UB = sum(FALSOS_NEGATIVOS_UB, na.rm = T),
+                                               NEG_TOTAL_MED = NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_MED,
+                                               NEG_TOTAL_LB = NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_LB,
+                                               NEG_TOTAL_UB = NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_UB,
+                                               PROP_FN_MED = if_else(NEGATIVOS_OFICIAL > 0, 
+                                                                     round(FALSOS_NEGATIVOS_MED/NEGATIVOS_OFICIAL,3), 0),
+                                               PROP_FN_LB = if_else(NEGATIVOS_OFICIAL >0, 
+                                                                    round(FALSOS_NEGATIVOS_LB/NEGATIVOS_OFICIAL,3), 0),
+                                               PROP_FN_UB = if_else(NEGATIVOS_OFICIAL >0,
+                                                                    round(FALSOS_NEGATIVOS_UB/NEGATIVOS_OFICIAL,3), 0),
+                                               POSITIVOS_OFICIAL_ACUM = cumsum(POSITIVOS_OFICIAL),
+                                               NEGATIVOS_OFICIAL_ACUM = cumsum(NEGATIVOS_OFICIAL),
+                                               PRUEBAS_TOTALES_ACUM = cumsum(PRUEBAS_TOTALES),
+                                               PRUEBAS_NEG_OFICIAL_ACUM = cumsum(NEGATIVOS_OFICIAL),
+                                               FALSOS_NEG_MED_ACUM = cumsum(FALSOS_NEGATIVOS_MED),
+                                               POSITIVOS_MED_ACUM = cumsum(POSITIVOS_MED),
+                                               POS_FN_ACUM = FALSOS_NEG_MED_ACUM + POSITIVOS_OFICIAL_ACUM,
+                                               NUM_UCI_TOTAL = sum(NUM_UCI_TOTAL, na.rm = T),
+                                               NUM_UCI_POS = sum(NUM_UCI_POS, na.rm = T),
+                                               NUM_UCI_NEG = sum(NUM_UCI_NEG, na.rm = T),
+                                               NUM_UCI_MED = round(NUM_UCI_POS + (PROP_FN_MED * NUM_UCI_NEG),0),
+                                               NUM_UCI_LB = round(NUM_UCI_POS + (PROP_FN_LB * NUM_UCI_NEG),0),
+                                               NUM_UCI_UB = round(NUM_UCI_POS + (PROP_FN_UB * NUM_UCI_NEG),0),
+                                               NUM_DEF_TOTAL = sum(NUM_DEF_TOTAL, na.rm = T),
+                                               NUM_DEF_POS = sum(NUM_DEF_POS, na.rm = T),
+                                               NUM_DEF_NEG = sum(NUM_DEF_NEG, na.rm = T),
+                                               NUM_DEF_MED = round(NUM_DEF_POS + (PROP_FN_MED * NUM_DEF_NEG),0),
+                                               NUM_DEF_LB = round(NUM_DEF_POS + (PROP_FN_LB * NUM_DEF_NEG),0),
+                                               NUM_DEF_UB = round(NUM_DEF_POS + (PROP_FN_UB * NUM_DEF_NEG),0)) %>% 
+                                     ungroup() %>% 
+                                     mutate(FECHA_ACTUALIZACION = ymd(fecha_actualizacion[i-1])))
+}
+
+
+#Suggest saving this data.frame as code is slow
+save(base_preliminar_estados, file = "base_preliminar_estados_sep_21.Rda")
+```
+
+
+```{r By-State graphs of per reporting date analysis, echo = F, eval = T, warning = F, message = F}
+Sys.setlocale("LC_ALL", locale= "English")
+estados <- data.frame(num_edo = c("01","02","03","04","05","06","07","08","09",10 :32),
+                      nombre_edo = c("AGUASCALIENTES", "BAJA CALIFORNIA", "BAJA CALIFORNIA SUR",
+                                     "CAMPECHE", "COAHUILA", "COLIMA", "CHIAPAS", "CHIHUAHUA",
+                                     "CIUDAD DE MÉXICO", "DURANGO", "GUANAJUATO", "GUERRERO", "HIDALGO",
+                                     "JALISCO","ESTADO DE MÉXICO", "MICHOACÁN", "MORELOS", "NAYARIT",
+                                     "NUEVO LEÓN", "OAXACA", "PUEBLA", "QUERÉTARO", "QUINTANA ROO", 
+                                     "SAN LUIS POTOSÍ", "SINALOA", "SONORA", "TABASCO", "TAMAULIPAS", "TLAXCALA",
+                                     "VERACRUZ", "YUCATÁN", "ZACATECAS"))
+
+
+### Filling dates with no testing reported in certain states (frequent during early epidemic), per reporting date analysis
+ base_preliminar_estados_mod <- base_preliminar_estados %>% 
+  filter(FECHA_ACTUALIZACION >= "2020-04-12" & ENTIDAD_UM == estados$num_edo[1]) %>% 
+  full_join(data.frame(FECHA_ACTUALIZACION = seq.Date(from = ymd("2020-04-13"), 
+                                                      to = ymd("2020-09-21"), by = 1)), by = "FECHA_ACTUALIZACION") %>%     
+  arrange(by = FECHA_ACTUALIZACION) %>% 
+  group_by(FECHA_ACTUALIZACION) %>% 
+   mutate(PRUEBAS_TOTALES = if_else(!is.na(PRUEBAS_TOTALES), PRUEBAS_TOTALES, as.integer(0)),
+          POSITIVOS_OFICIAL = if_else(!is.na(POSITIVOS_OFICIAL), POSITIVOS_OFICIAL, as.integer(0)),
+          NEGATIVOS_OFICIAL = if_else(!is.na(NEGATIVOS_OFICIAL), NEGATIVOS_OFICIAL, as.integer(0)),
+          FALSOS_NEGATIVOS_MED = if_else(!is.na(FALSOS_NEGATIVOS_MED), FALSOS_NEGATIVOS_MED, 0),
+          POSITIVOS_FN_MED = if_else(FALSOS_NEGATIVOS_MED + POSITIVOS_OFICIAL <=PRUEBAS_TOTALES,
+                                     FALSOS_NEGATIVOS_MED + POSITIVOS_OFICIAL, as.double(PRUEBAS_TOTALES))) %>% 
+   ungroup() %>% 
+   mutate(PRUEBAS_TOTALES_ACUM = cumsum(PRUEBAS_TOTALES),
+          PRUEBAS_NEG_OFICIAL_ACUM = cumsum(NEGATIVOS_OFICIAL),
+          FALSOS_NEG_MED_ACUM = cumsum(FALSOS_NEGATIVOS_MED),
+          POSITIVOS_MED_ACUM = cumsum(POSITIVOS_MED),
+          POSITIVOS_OFICIAL_ACUM = cumsum(POSITIVOS_OFICIAL),
+          NEGATIVOS_OFICIAL_ACUM = cumsum(NEGATIVOS_OFICIAL),
+          POS_FN_ACUM = FALSOS_NEG_MED_ACUM + POSITIVOS_OFICIAL_ACUM,
+          NEGATIVOS_MED = NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_MED,
+          ENTIDAD_UM = estados$num_edo[1])
+ 
+ 
+for(i in 2:length(estados$num_edo)){
+  base_preliminar_estados_mod <-
+    rbind(base_preliminar_estados_mod,base_preliminar_estados %>% 
+            filter(FECHA_ACTUALIZACION >= "2020-04-12" & ENTIDAD_UM == estados$num_edo[i]) %>% 
+  full_join(data.frame(FECHA_ACTUALIZACION = seq.Date(from = ymd("2020-04-13"), 
+                                                      to = ymd("2020-09-21"), by = 1)), 
+            by = "FECHA_ACTUALIZACION") %>%     
+  arrange(by = FECHA_ACTUALIZACION) %>% 
+  group_by(FECHA_ACTUALIZACION) %>% 
+  mutate(PRUEBAS_TOTALES = if_else(!is.na(PRUEBAS_TOTALES), PRUEBAS_TOTALES, as.integer(0)),
+         POSITIVOS_OFICIAL = if_else(!is.na(POSITIVOS_OFICIAL), POSITIVOS_OFICIAL, as.integer(0)),
+         NEGATIVOS_OFICIAL = if_else(!is.na(NEGATIVOS_OFICIAL), NEGATIVOS_OFICIAL, as.integer(0)),
+         FALSOS_NEGATIVOS_MED = if_else(!is.na(FALSOS_NEGATIVOS_MED), FALSOS_NEGATIVOS_MED, 0),
+         POSITIVOS_FN_MED = if_else(FALSOS_NEGATIVOS_MED + POSITIVOS_OFICIAL <=PRUEBAS_TOTALES,
+                                    FALSOS_NEGATIVOS_MED + POSITIVOS_OFICIAL, as.double(PRUEBAS_TOTALES))) %>% 
+  ungroup() %>% 
+  mutate(PRUEBAS_TOTALES_ACUM = cumsum(PRUEBAS_TOTALES),
+         PRUEBAS_NEG_OFICIAL_ACUM = cumsum(NEGATIVOS_OFICIAL),
+         FALSOS_NEG_MED_ACUM = cumsum(FALSOS_NEGATIVOS_MED),
+         POSITIVOS_MED_ACUM = cumsum(POSITIVOS_MED),
+         POSITIVOS_OFICIAL_ACUM = cumsum(POSITIVOS_OFICIAL),
+         POS_FN_ACUM = FALSOS_NEG_MED_ACUM + POSITIVOS_OFICIAL_ACUM,
+         NEGATIVOS_MED = NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_MED,
+         ENTIDAD_UM = estados$num_edo[i]))
+}
+#########################
+
+# Bar graphs for both analyses (per-reporting date and per-occurrence date) of every state are coded inside the for loop ###################
+for(i in seq_along(estados$nombre_edo)){
+assign(str_replace_all(string=str_c("graf_s_borde_",estados$nombre_edo[i]),pattern= " ",replacement= "_"),
+# Daily cases (per reporting date) with false negatives
+(ggplot(filter(base_preliminar_estados_mod, ENTIDAD_UM == estados$num_edo[i] & FECHA_ACTUALIZACION >= "2020-04-13"),
+       aes(x = FECHA_ACTUALIZACION, y=PRUEBAS_TOTALES, fill = "True negative")) + 
+  geom_area() +
+  geom_area(aes(y = POSITIVOS_FN_MED, fill = "False negative"))+
+  geom_area(aes(y = POSITIVOS_OFICIAL, fill = "Official positive"))+
+  labs(y = "Number of tests",
+       x = "Date")+
+  scale_fill_manual(breaks = c( "True negative", "False negative", "Official positive"),
+                    values=c( "deepskyblue4", "gray50", "darkorange2"))+
+  scale_x_date(date_breaks = "1 week",
+               date_labels ="%B %d",
+               expand = c(0.03, 0.03))+
+  theme_minimal()+
+  ggtitle("A)")+
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, vjust = .25, hjust = 0.95, size = 14, face = "bold"),
+        axis.title = element_blank(),
+        axis.ticks = element_line(size = 1, colour = "black"),
+        axis.title.y = element_text(face = "bold", size = 14),
+        axis.text.y = element_text(size = 14, face = "bold"),
+        plot.title = element_text(size = 14, face = "bold")))+
+# Daily accumulated cases (per reporting date) with false negatives
+(ggplot(filter(base_preliminar_estados_mod, ENTIDAD_UM == estados$num_edo[i]),
+       aes(x = FECHA_ACTUALIZACION, y=cumsum(PRUEBAS_TOTALES), fill = str_c("True negative (total = ", 
+                                                                    sum(NEGATIVOS_MED, na.rm = T),")"))) + 
+  geom_area() +
+  geom_area(aes(y = POS_FN_ACUM, fill = str_c("False negative (total = ", 
+                                                   last(FALSOS_NEG_MED_ACUM),")")))+
+  geom_area(aes(y = POSITIVOS_OFICIAL_ACUM, fill = str_c("Official positive (total = ", 
+                                                   last(POSITIVOS_OFICIAL_ACUM),")")))+
+  labs(y = "Number of tests",
+       fill = str_c("Test result (total tests = ",
+                    sum(filter(base_preliminar_estados_mod, ENTIDAD_UM == estados$num_edo[i] & 
+                                 FECHA_ACTUALIZACION >= "2020-04-12")$PRUEBAS_TOTALES, na.rm = T), ")"))+
+  scale_fill_manual(breaks = c(str_c("True negative (total = ", 
+                                      sum(mutate(filter(base_preliminar_estados_mod, ENTIDAD_UM == estados$num_edo[i] & 
+                                                   FECHA_ACTUALIZACION >= "2020-04-12"),
+                                                 NEGATIVOS_MED = NEGATIVOS_OFICIAL-FALSOS_NEGATIVOS_MED)$NEGATIVOS_MED, 
+                                          na.rm = T),")"),
+                               str_c("False negative (total = ", 
+                                     sum(filter(base_preliminar_estados_mod, ENTIDAD_UM == estados$num_edo[i] & 
+                                                  FECHA_ACTUALIZACION >= "2020-04-12")$FALSOS_NEGATIVOS_MED, na.rm = T),")"),
+                                str_c("Official positive (total = ", 
+                                      sum(filter(base_preliminar_estados_mod, ENTIDAD_UM == estados$num_edo[i] & 
+                                                   FECHA_ACTUALIZACION >= "2020-04-12")$POSITIVOS_OFICIAL, na.rm = T),")")),
+                    values=c( "deepskyblue4", "gray50", "darkorange2"))+
+  scale_x_date(date_breaks = "1 week",
+               date_labels ="%B %d",
+               expand = c(0.03, 0.03))+
+  theme_minimal()+
+  ggtitle("B)")+
+  theme(legend.position = c(0.35, 0.7),
+        legend.title = element_text(size = 14, face = "bold"),
+        legend.text = element_text(size = 14),
+        axis.text.x = element_text(angle = 90, vjust = .25, hjust = 0.95, size = 14, face = "bold"),
+        axis.title = element_blank(),
+        axis.ticks = element_line(size = 1, colour = "black"),
+        axis.title.y = element_text(face = "bold", size = 14),
+        axis.text.y = element_text(size = 14, face = "bold"),
+        plot.title = element_text(size = 14, face = "bold")))+
+  plot_annotation(
+    title = str_c("Figure SE. ", estados$nombre_edo[i]),
+    caption = "Study period February 27 - September 21 (shown from April 13). A) represents daily counts, while B) represents accumulated cases.",
+    theme = theme(plot.title = element_text(size = 20, face = "bold"),
+                  plot.caption = element_text(size = 14))))
+}
+
+
+#All graphs (32) have names with this format -> graf_s_borde_AGUASCALIENTES
+```
+
+
+```{r State plots, echo = F, eval = T, warning = F}
+guardar_plot <- function(x,y){
+ggsave(plot=x, file = str_c(y, ".pdf") ,path=
+"~/Protocolos de investigación/BASE COVID GOB/covid_mex/Estudio sobre el impacto de los falsos negativos en los estimadores en México/Manuscrito lancet/Figuras/figuras_por_entidad",
+width = 16, height = 9.5, units = "in")
+}
+
+#IMPRESIÓN EN PDF
+guardar_plot(graf_s_borde_AGUASCALIENTES, "aguascalientes")
+guardar_plot(graf_s_borde_BAJA_CALIFORNIA, "baja_california")
+guardar_plot(graf_s_borde_BAJA_CALIFORNIA_SUR, "baja_california_sur")
+guardar_plot(graf_s_borde_CAMPECHE, "campeche")
+guardar_plot(graf_s_borde_CHIAPAS, "chiapas")
+guardar_plot(graf_s_borde_CHIHUAHUA, "chihuahua")
+guardar_plot(graf_s_borde_CIUDAD_DE_MÉXICO, "ciudad_de_mexico")
+guardar_plot(graf_s_borde_COAHUILA, "coahuila")
+guardar_plot(graf_s_borde_COLIMA, "colima")
+guardar_plot(graf_s_borde_DURANGO, "durango")
+guardar_plot(graf_s_borde_ESTADO_DE_MÉXICO, "edo_mex")
+guardar_plot(graf_s_borde_GUANAJUATO, "guanajuato")
+guardar_plot(graf_s_borde_GUERRERO, "guerrero")
+guardar_plot(graf_s_borde_HIDALGO, "hidalgo")
+guardar_plot(graf_s_borde_JALISCO, "jalisco")
+guardar_plot(graf_s_borde_MICHOACÁN, "michoacan")
+guardar_plot(graf_s_borde_MORELOS, "morelos")
+guardar_plot(graf_s_borde_NAYARIT, "nayarit")
+guardar_plot(graf_s_borde_NUEVO_LEÓN, "nuevo_leon")
+guardar_plot(graf_s_borde_OAXACA, "oaxaca")
+guardar_plot(graf_s_borde_PUEBLA, "puebla")
+guardar_plot(graf_s_borde_QUERÉTARO, "queretaro")
+guardar_plot(graf_s_borde_QUINTANA_ROO, "quintana_roo")
+guardar_plot(graf_s_borde_SAN_LUIS_POTOSÍ, "san_luis_potosi")
+guardar_plot(graf_s_borde_SINALOA, "sinaloa")
+guardar_plot(graf_s_borde_SONORA, "sonora")
+guardar_plot(graf_s_borde_TABASCO, "tabasco")
+guardar_plot(graf_s_borde_TAMAULIPAS, "tamaulipas")
+guardar_plot(graf_s_borde_TLAXCALA, "tlaxcala")
+guardar_plot(graf_s_borde_VERACRUZ, "veracruz")
+guardar_plot(graf_s_borde_YUCATÁN, "yucatan")
+guardar_plot(graf_s_borde_ZACATECAS, "zacatecas")
+
+```
+
+
+```{r Table 2 Per-REPORTING date by-state estimates, echo = F, eval = T}
+names(entidades_df_res) <- toupper(names(entidades_df_res))
+entidades_df_res <- entidades_df_res %>% 
+  mutate(ENTIDAD = toupper(str_replace_all(ENTIDAD, "_", " ")))
+
+nombres_variables_tabla_3 <- c("State",
+                       "Official Positive tests",
+                       "Estimated positive tests (95% CL)",
+                       "Reported ICU admissions",
+                       "Esimated ICU admissions",
+                       "Reported deaths",
+                       "Estimated deaths",
+                       "Total number of tests during study period")
+
+
+entidad_resumido <- base_preliminar_estados %>% 
+  group_by(ENTIDAD_UM) %>% 
+  summarise(PRUEBAS_TOTALES = sum(PRUEBAS_TOTALES, na.rm = T),
+            POSITIVOS_OFICIAL = sum(POSITIVOS_OFICIAL, na.rm = T),
+            POSITIVOS_MED = sum(POSITIVOS_MED, na.rm = T),
+            POSITIVOS_LB = sum(POSITIVOS_LB, na.rm = T),
+            POSITIVOS_UB = sum(POSITIVOS_UB, na.rm = T),
+            PORCENTAJE_POS_OFICIAL = round((POSITIVOS_OFICIAL/PRUEBAS_TOTALES)*100,1),
+            PORCENTAJE_POS_MED = round((POSITIVOS_MED/PRUEBAS_TOTALES)*100,1),
+            PORCENTAJE_POS_LB = if_else(round((POSITIVOS_LB/PRUEBAS_TOTALES)*100,1) >100,
+                                        100, round((POSITIVOS_LB/PRUEBAS_TOTALES)*100,1)),
+            PORCENTAJE_POS_UB = round((POSITIVOS_UB/PRUEBAS_TOTALES)*100,1),
+            NUM_UCI_POS = sum(NUM_UCI_POS, na.rm = T),
+            NUM_UCI_MED = sum(NUM_UCI_MED, na.rm = T),
+            NUM_UCI_LB = sum(NUM_UCI_LB, na.rm = T),
+            NUM_UCI_UB = sum(NUM_UCI_UB, na.rm = T),
+            NUM_DEF_POS = sum(NUM_DEF_POS, na.rm = T),
+            NUM_DEF_MED = sum(NUM_DEF_MED, na.rm = T),
+            NUM_DEF_LB = sum(NUM_DEF_LB, na.rm = T),
+            NUM_DEF_UB = sum(NUM_DEF_UB, na.rm = T)) %>% 
+  filter(!is.na(ENTIDAD_UM)) %>% 
+  mutate(POBLACION = entidades_df_res$POBLACION,
+         PRUEBAS_POR_10k = round((PRUEBAS_TOTALES/POBLACION)*10000))
+
+
+tabla_2_df <- data.frame(entidad = entidades_df_res$ENTIDAD,
+          positivos_oficial = str_c(entidad_resumido$POSITIVOS_OFICIAL," (", 
+                                    entidad_resumido$PORCENTAJE_POS_OFICIAL,"%)"),
+          positivos_estimados = str_c(entidad_resumido$POSITIVOS_MED," (", 
+                                    entidad_resumido$POSITIVOS_UB,"-",
+                                    if_else(entidad_resumido$POSITIVOS_LB>=
+                                             entidad_resumido$PRUEBAS_TOTALES,
+                                            as.integer(entidad_resumido$PRUEBAS_TOTALES),
+                                            as.integer(entidad_resumido$POSITIVOS_LB)), ")"), 
+          positivos_estimados_porcentaje = str_c(entidad_resumido$PORCENTAJE_POS_MED,"% (", 
+                                    entidad_resumido$PORCENTAJE_POS_UB,"-",
+                                    entidad_resumido$PORCENTAJE_POS_LB, "%)"),
+         uci_oficial = entidad_resumido$NUM_UCI_POS,
+         uci_estimado = str_c(entidad_resumido$NUM_UCI_MED," (",
+                              entidad_resumido$NUM_UCI_UB,"-",
+                              entidad_resumido$NUM_UCI_LB, ")"),
+         defunciones_oficial = entidad_resumido$NUM_DEF_POS,
+         defunciones_estimado = str_c(entidad_resumido$NUM_DEF_MED," (",
+                              entidad_resumido$NUM_DEF_UB,"-",
+                              entidad_resumido$NUM_DEF_LB, ")"),
+         pruebas_totales = entidad_resumido$PRUEBAS_TOTALES,
+         PORCENTAJE_POS_MED = entidad_resumido$PORCENTAJE_POS_MED,
+         PORCENTAJE_POS_MED = entidad_resumido$PRUEBAS_POR_10k) %>% 
+  arrange(desc(PORCENTAJE_POS_MED)) %>% 
+  select(-PORCENTAJE_POS_MED)
+
+
+names(tabla_2_df) <- c("Variable", "Official positive", "Estimated positive", "Positivity rate (%)", 
+                       "ICU admissions \n (Reported)", "ICU admissions \n (Estimated)", 
+                       "Deaths \n (Reported)",  "Deaths \n (Estimated)", "Total tests", "Tests per 10k")
+
+flextable(tabla_2_df, cwidth=2)
+
+View(tabla_2_df)
+```
+
+
+```{r Table SE: Per-reporting date STATE estimates, echo = F, eval = T, warning = F}
+fechas_tabla_1 <- data.frame(fechas_nombre = c(str_c(lubridate::month(seq.Date(from=as.Date("2020-04-13"), 
+                                     to =as.Date("2020-09-21"),by = 7),label = TRUE, abbr = F),
+                      " ",
+                      lubridate::day(seq.Date(from=as.Date("2020-04-13"), 
+                                     to =as.Date("2020-09-21"),by = 7))),"September 21"),
+                      fechas = c(seq.Date(from=as.Date("2020-04-13"), 
+                                     to =as.Date("2020-09-21"), by = 7),ymd("2020-09-21")))
+
+fechas_t1 <- as.character(fechas_tabla_1$fechas_nombre)
+
+
+nombres_variables_tabla_1 <- c("N",
+                       "Positive tests",
+                       "Negative tests",
+                       "Estimated false negative tests",
+                       "Overall ICU count",
+                       "Overall Death count")
+
+for(i in 1:32){
+  assign(str_c("tabla_se_", str_replace_all(estados$nombre_edo[i], pattern = " ", replacement = "_")),
+         data.frame(Variable = nombres_variables_tabla_1,
+                    official_count=c(sum(base_preliminar_estados$PRUEBAS_TOTALES
+                                         [base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                         na.rm = T), 
+                                str_c(sum(base_preliminar_estados$POSITIVOS_OFICIAL
+                                          [base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                 na.rm = T), " (", 
+                                             round(sum(base_preliminar_estados$POSITIVOS_OFICIAL                                                       [base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]],na.rm=T)
+                                                   /sum(base_preliminar_estados$PRUEBAS_TOTALES                                                          [base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]],                                                                                          na.rm = T)*100,1),"%)"),
+                                str_c(sum(base_preliminar_estados$NEGATIVOS_OFICIAL[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)," (",
+                                             round(sum(base_preliminar_estados$NEGATIVOS_OFICIAL[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                       na.rm = T)/sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                                      na.rm = T)*100,1),"%)"), 
+                                       NA,
+                                       sum(base_preliminar_estados$NUM_UCI_POS[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T),
+                                       sum(base_preliminar_estados$NUM_DEF_POS[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)),
+                    average_test = c(sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm =T), 
+                                     str_c(sum(base_preliminar_estados$POSITIVOS_MED[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T), " (", 
+                                           round(sum(base_preliminar_estados$POSITIVOS_MED[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                     na.rm = T)/sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]],
+                                                                    na.rm = T)*100,1),"%)"),
+                                     str_c(sum(base_preliminar_estados$NEG_TOTAL_MED[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)," (",
+                                           round(sum(base_preliminar_estados$NEG_TOTAL_MED[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                     na.rm = T)/sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]],
+                                                                    na.rm = T)*100,1),"%)"),  
+                                     str_c(sum(base_preliminar_estados$FALSOS_NEGATIVOS_MED[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)," (",
+                                           round(sum(base_preliminar_estados$FALSOS_NEGATIVOS_MED[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                     na.rm = T)/
+                                                   sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                       na.rm = T)*100,1),"%)"),
+                                     sum(base_preliminar_estados$NUM_UCI_MED[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T),
+                                     sum(base_preliminar_estados$NUM_DEF_MED[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)),
+                    best_test = c(sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm =T), 
+                                  str_c(sum(base_preliminar_estados$POSITIVOS_UB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T), " (", 
+                                        round(sum(base_preliminar_estados$POSITIVOS_UB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                  na.rm = T)/sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]],
+                                                                 na.rm = T)*100,1),"%)"),
+                                  str_c(sum(base_preliminar_estados$NEG_TOTAL_UB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)," (",
+                                        round(sum(base_preliminar_estados$NEG_TOTAL_UB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                  na.rm = T)/sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]],
+                                                                 na.rm = T)*100,1),"%)"),  
+                                  str_c(sum(base_preliminar_estados$FALSOS_NEGATIVOS_UB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)," (",
+                                        round(sum(base_preliminar_estados$FALSOS_NEGATIVOS_UB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)/
+                                                sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]],
+                                                    na.rm = T)*100,1),"%)"),
+                                  sum(base_preliminar_estados$NUM_UCI_UB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T),
+                                  sum(base_preliminar_estados$NUM_DEF_UB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)),
+                    worst_test =
+                      
+                      c(sum(base_preliminar_estados$PRUEBAS_TOTALES
+                            [base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm =T), 
+                                   str_c(ifelse(sum(base_preliminar_estados$POSITIVOS_LB
+                                                    [base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                    na.rm = T)>=sum(base_preliminar_estados$PRUEBAS_TOTALES                                         [base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T),
+                                                sum(base_preliminar_estados$PRUEBAS_TOTALES
+                                                    [base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T),
+                                                sum(base_preliminar_estados$POSITIVOS_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)), " (",  
+                                         ifelse(sum(base_preliminar_estados$POSITIVOS_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)>=
+                                                  sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T),
+                                                100,
+                                                round(sum(base_preliminar_estados$POSITIVOS_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm=T)/
+                                                        sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                            na.rm = T)*100,1)),"%)"),
+                                   str_c(
+                                     ifelse(sum(base_preliminar_estados$POSITIVOS_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)>=
+                                              sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T),
+                                            0,
+                                            sum(base_preliminar_estados$NEG_TOTAL_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T))," (",
+                                     ifelse(sum(base_preliminar_estados$POSITIVOS_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)>=
+                                              sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T),
+                                            0,
+                                            round(sum(base_preliminar_estados$NEG_TOTAL_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                      na.rm = T)/sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                                     na.rm = T)*100,1)),"%)"),  
+                                   str_c(
+                                     ifelse(sum(base_preliminar_estados$POSITIVOS_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)>=
+                                              sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T),
+                                            sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)-
+                                              sum(base_preliminar_estados$POSITIVOS_OFICIAL[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T),   
+                                            sum(base_preliminar_estados$FALSOS_NEGATIVOS_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                na.rm = T))," (",
+                                     ifelse(
+                                       sum(base_preliminar_estados$POSITIVOS_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T)>=
+                                         sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T),
+                                       100-round(sum(base_preliminar_estados$POSITIVOS_OFICIAL[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]],
+                                                     na.rm=T)/sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                                  na.rm = T)*100,1),
+                                       round(sum(base_preliminar_estados$FALSOS_NEGATIVOS_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                 na.rm = T)/
+                                               sum(base_preliminar_estados$PRUEBAS_TOTALES[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], 
+                                                   na.rm = T)*100,1)),"%)"),
+                                   sum(base_preliminar_estados$NUM_UCI_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T),
+                                   sum(base_preliminar_estados$NUM_DEF_LB[base_preliminar_estados$ENTIDAD_UM==estados$num_edo[i]], na.rm = T))) %>% 
+           rename("Official count" = official_count,
+                  "Average test estimates" = average_test,
+                  "Best test estimates" = best_test,
+                  "Worst test estimates" = worst_test))
+}
+```
+
+
+```{r State table printing, echo = F, eval = T, warning=F}
+guardar_tabla <- function(x,y){
+save_as_docx(flextable(x, cwidth = 1.5) %>% 
+               add_header_lines(str_c("Table SE. ", 
+                                      "Official and estimated COVID-19 cases by date of reporting in ", 
+                                      str_replace_all(toupper(y), pattern = "_", replacement = " "))), 
+             path = str_c("tabla_",y, ".docx"))
+}
+
+
+guardar_tabla(tabla_se_AGUASCALIENTES, "aguascalientes")
+guardar_tabla(tabla_se_BAJA_CALIFORNIA, "baja_california")
+guardar_tabla(tabla_se_BAJA_CALIFORNIA_SUR, "baja_california_sur")
+guardar_tabla(tabla_se_CAMPECHE, "campeche")
+guardar_tabla(tabla_se_CHIAPAS, "chiapas")
+guardar_tabla(tabla_se_CHIHUAHUA, "chihuahua")
+guardar_tabla(tabla_se_CIUDAD_DE_MÉXICO, "ciudad_de_mexico")
+guardar_tabla(tabla_se_COAHUILA, "coahuila")
+guardar_tabla(tabla_se_COLIMA, "colima")
+guardar_tabla(tabla_se_DURANGO, "durango")
+guardar_tabla(tabla_se_ESTADO_DE_MÉXICO, "edo_mex")
+guardar_tabla(tabla_se_GUANAJUATO, "guanajuato")
+guardar_tabla(tabla_se_GUERRERO, "guerrero")
+guardar_tabla(tabla_se_HIDALGO, "hidalgo")
+guardar_tabla(tabla_se_JALISCO, "jalisco")
+guardar_tabla(tabla_se_MICHOACÁN, "michoacan")
+guardar_tabla(tabla_se_MORELOS, "morelos")
+guardar_tabla(tabla_se_NAYARIT, "nayarit")
+guardar_tabla(tabla_se_NUEVO_LEÓN, "nuevo_leon")
+guardar_tabla(tabla_se_OAXACA, "oaxaca")
+guardar_tabla(tabla_se_PUEBLA, "puebla")
+guardar_tabla(tabla_se_QUERÉTARO, "queretaro")
+guardar_tabla(tabla_se_QUINTANA_ROO, "quintana_roo")
+guardar_tabla(tabla_se_SAN_LUIS_POTOSÍ, "san_luis_potosi")
+guardar_tabla(tabla_se_SINALOA, "sinaloa")
+guardar_tabla(tabla_se_SONORA, "sonora")
+guardar_tabla(tabla_se_TABASCO, "tabasco")
+guardar_tabla(tabla_se_TAMAULIPAS, "tamaulipas")
+guardar_tabla(tabla_se_TLAXCALA, "tlaxcala")
+guardar_tabla(tabla_se_VERACRUZ, "veracruz")
+guardar_tabla(tabla_se_YUCATÁN, "yucatan")
+guardar_tabla(tabla_se_ZACATECAS, "zacatecas")
+```
+
+
+```{r Miscelaneous calculations included in text, echo = F, eval = T, warning = F}
+#Number of tests in the study period
+nrow(filter(covid_mx, fecha_ingreso >= "2020-02-27" &
+              fecha_ingreso <= "2020-09-21"))
+
+# Number of tests in the study period with a pending result
+nrow(filter(covid_mx, fecha_ingreso >= "2020-02-27" &
+              fecha_ingreso <= "2020-09-21" & 
+              resultado == 3))
+
+# Number of tests in the study period with available result but >21 days with symptoms 
+nrow(filter(covid_mx, fecha_ingreso >= "2020-02-27" &
+              fecha_ingreso <= "2020-09-21" & 
+              fecha_ingreso-fecha_sintomas >21 ))
+
+# Number of tests finally included 
+nrow(filter(covid_mx, fecha_ingreso >= "2020-02-27" &
+              fecha_ingreso <= "2020-09-21" & 
+              fecha_ingreso-fecha_sintomas <=21 &
+            resultado != 3))
+
+# Test discrepancy
+sum(base_completa_per_reporting_date$pruebas_totales)-nrow(filter(covid_mx, fecha_ingreso >= "2020-02-27" &
+              fecha_ingreso <= "2020-09-21" & 
+              fecha_ingreso-fecha_sintomas <=21 &
+            resultado != 3))
+
+sum(base_completa_per_reporting_date$pruebas_totales)
+sum(base_completa_per_reporting_date$pruebas_totales)-sum(base_completa_per_reporting_date$positivos_oficial)
+sum(base_completa_per_reporting_date$positivos_oficial)
+sum(base_completa_per_reporting_date$positivos_med)
+sum(base_completa_per_reporting_date$positivos_ub)
+sum(base_completa_per_reporting_date$positivos_lb)
+
+round(sum(base_completa_per_reporting_date$positivos_oficial)/sum(base_completa_per_reporting_date$pruebas_totales),3)
+
+round((sum(base_completa_per_reporting_date$pruebas_totales)-sum(base_completa_per_reporting_date$positivos_oficial))/
+        sum(base_completa_per_reporting_date$pruebas_totales),3)
+
+#Date in which estimated cases first surpassed 50,000
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$pruebas_pos_med_acum >=50000][1];
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$pruebas_pos_ub_acum >=50000][1]; 
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$pruebas_pos_lb_acum >=50000][1]; 
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$pruebas_pos_oficial_acum >=50000][1]#########
+#Date in which positivity rate first surpassed 50%
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$proporcion_positivos_med >=0.5][1];
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$proporcion_positivos_ub >=0.5][1]; 
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$proporcion_positivos_lb >=0.5][1]; 
+base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$proporcion_positivos_oficial >=0.5][1]
+
+
+#Nacional ICU admissions and deaths (first in all patients and then in covid19 positive ones)
+uci_conteo_neg[1]+uci_conteo_pos[1]
+def_conteo_neg[1]+def_conteo_pos[1]
+
+sum(uci_def_per_reporting_date$uci_dia, na.rm = T)/(uci_conteo_neg[1]+uci_conteo_pos[1])
+sum(uci_def_per_reporting_date$defuncion_dia, na.rm = T)/(def_conteo_neg[1]+def_conteo_pos[1])
+
+
+#ICU admissions estimation
+uci_def_per_reporting_date$uci[1];
+sum(uci_def_per_reporting_date$uci_dia_total_med, na.rm =T);
+sum(uci_def_per_reporting_date$uci_total_dia_ub, na.rm =T);
+sum(uci_def_per_reporting_date$uci_dia_total_lb, na.rm =T)
+
+
+#Deaths estimation
+uci_def_per_reporting_date$defuncion[1];
+sum(uci_def_per_reporting_date$defuncion_dia_total_med, na.rm =T);
+sum(uci_def_per_reporting_date$defuncion_dia_total_ub, na.rm =T);
+sum(uci_def_per_reporting_date$defuncion_dia_total_lb, na.rm =T)
+
+
+
+#Same number of countru-wide tests than in states
+sum(base_completa_per_reporting_date$pruebas_totales)==sum(entidad_resumido$PRUEBAS_TOTALES)
+  
+# States with highest number of cases
+states_high_cases <- base_preliminar_estados %>% 
+  group_by(ENTIDAD_UM) %>% 
+  summarise(pruebas_totales=sum(PRUEBAS_TOTALES)) %>% 
+  filter(pruebas_totales!=0) %>% 
+  mutate(nombre = estados$nombre_edo) %>% 
+  arrange(by = desc(pruebas_totales))
+
+states_high_cases$nombre
+
+# States with lowest testing rate
+View(arrange(tabla_2_df, `Tests per 10k`))
+
+
+
+# Calculations for abstract
+# People tested in Mexico
+nrow(filter(covid_mx, fecha_ingreso >="2020-02-27"&fecha_ingreso <= "2020-09-21"))
+#Included patients, calculated with our method
+sum(base_completa_per_reporting_date$pruebas_totales) 
+# Estimated positive with average test
+sum(base_completa_per_reporting_date$positivos_med) 
+#Estimated positive with best test
+sum(base_completa_per_reporting_date$positivos_ub)
+#Estimated positive with worst test
+sum(base_completa_per_reporting_date$positivos_lb)
+# Official positive
+str_c(sum(base_completa_per_reporting_date$positivos_oficial), "(", round(sum(base_completa_per_reporting_date$positivos_oficial)/sum(base_completa_per_reporting_date$pruebas_totales),3), ")")
+# Official negative
+str_c(sum(base_completa_per_reporting_date$negativos_oficial), "(", round(sum(base_completa_per_reporting_date$negativos_oficial)/sum(base_completa_per_reporting_date$pruebas_totales),3), ")")
+# Percentage increase of ICU admissions avg test
+round((sum(uci_def_per_reporting_date$uci_dia_total_med, na.rm =T)/uci_def_per_reporting_date$uci[1])-1,2)
+# Percentage increase of ICU admissions best test
+round((sum(uci_def_per_reporting_date$uci_total_dia_ub, na.rm =T)/uci_def_per_reporting_date$uci[1])-1,2)
+# Percentage increase of ICU admissions worst test
+round((sum(uci_def_per_reporting_date$uci_dia_total_lb, na.rm =T)/uci_def_per_reporting_date$uci[1])-1,2)
+
+# Percentage increase of deaths with avg test
+round((sum(uci_def_per_reporting_date$defuncion_dia_total_med, na.rm =T)/uci_def_per_reporting_date$defuncion[1])-1,2)
+# Percentage increase of deaths with best test
+round((sum(uci_def_per_reporting_date$defuncion_dia_total_ub, na.rm =T)/uci_def_per_reporting_date$defuncion[1])-1,2)
+# Percentage increase of deaths with worst test
+round((sum(uci_def_per_reporting_date$defuncion_dia_total_lb, na.rm =T)/uci_def_per_reporting_date$defuncion[1])-1,2)
+
+# Percentage increase of cases avg test
+round((sum(base_completa_per_reporting_date$positivos_med)/sum(base_completa_per_reporting_date$positivos_oficial))-1,2)
+# Percentage increase of cases best test
+round((sum(base_completa_per_reporting_date$positivos_ub)/sum(base_completa_per_reporting_date$positivos_oficial))-1,2)
+# Percentage increase of cases worst test
+round((sum(base_completa_per_reporting_date$positivos_lb)/sum(base_completa_per_reporting_date$positivos_oficial))-1,2)
+```
+
+
+
+```{r Time to testing from symptom onset, echo = F, eval = T, warning=F}
+Sys.setlocale("LC_ALL", locale= "English")
+#Cálculo de las medias móviles (7 días). OJO, eso lo haré con la información per-reporting date, que es la que incluiré en el manuscrito
+base_trabajo <- as.data.table(filter(covid_mx, resultado != 3) %>% 
+  left_join(entidades_df, by = "entidad_um") %>% 
+  mutate(dias_al_ingreso = fecha_ingreso - fecha_sintomas)) %>% 
+  arrange(fecha_ingreso) %>% 
+  mutate(fecha_contagio_5 = fecha_sintomas - 5,
+         dias_c_inf_sts = fecha_sintomas - fecha_contagio_5,
+         dias_c_inf_ingreso = fecha_ingreso - fecha_contagio_5,
+         resultado = ifelse(resultado == 1, T, F),
+         dias_c_sts = as.numeric(dias_al_ingreso)+1) %>% 
+  filter(dias_c_inf_ingreso <=21 & fecha_ingreso >= "2020-02-27"& fecha_ingreso <= "2020-09-21")
+  
+
+fechas_media <- seq.Date(from=ymd("2020-02-27"), to = ymd("2020-09-21"), by = 1)
+
+
+
+for(i in 1:(length(fechas_media)-6)){
+  if(i == 1){
+  mm <- filter(base_trabajo, fecha_ingreso %in% fechas_media[i:(i+6)]) %>% 
+  group_by(fecha_ingreso) %>% 
+  summarise(media = mean(dias_c_sts),
+            desv_est = sd(dias_c_sts)) %>% 
+  ungroup() %>% 
+  summarise(media_mov = mean(media),
+            desv_est = mean(desv_est),
+            media_ub = media_mov + desv_est,
+            media_lb = media_mov - desv_est)
+  }else{
+  mm <- rbind(mm, filter(base_trabajo, fecha_ingreso %in% fechas_media[i:(i+6)]) %>% 
+  group_by(fecha_ingreso) %>% 
+  summarise(media = mean(dias_c_sts),
+            desv_est = sd(dias_c_sts)) %>% 
+  ungroup() %>% 
+  summarise(media_mov = mean(media),
+            desv_est = mean(desv_est),
+            media_ub = media_mov + desv_est,
+            media_lb = media_mov - desv_est))
+  }
+}
+
+mm$fecha <-  seq.Date(from=ymd("2020-03-04"), to = ymd("2020-09-21"), by = 1)
+mm <- right_join(mm, data.frame(fecha = seq.Date(from=ymd("2020-02-27"), to = ymd("2020-09-21"), by = 1)), by = "fecha")
+
+base_trabajo_media <- base_trabajo %>%
+  group_by(fecha_ingreso) %>% 
+  summarise(media = mean(dias_c_sts)) %>% 
+  rename(fecha = fecha_ingreso) %>% 
+  full_join(data.frame(fecha=seq.Date(from=ymd("2020-08-06"), to = ymd("2020-09-21"), by = 1)), by = "fecha")
+
+
+media_movil_grafica <- ggplot(base_trabajo_media, aes(y = media, x = fecha))+
+  geom_point()+
+  geom_line(aes(y = mm$media_mov, x = fecha),colour = "darkblue", size = 1.5) +
+  theme_minimal() +
+  scale_y_continuous(breaks = seq(from = 2, to = 6, by = 0.5), limits = c(2,6)) +
+  scale_x_date(date_breaks = "1 week",
+               date_labels ="%B %d",
+               expand = c(0.02,0))+
+  labs(x = "Date",
+       y = "Days from symptom onset to test")+
+  theme(axis.text.x = element_text(face = "bold", size = 14, angle = 90, 
+                                   vjust = 0.25, hjust = 0.95),
+        axis.title = element_text(size = 16, face = "bold"),
+        axis.ticks = element_line(size = 1, colour = "black"),
+        axis.title.y = element_text(size = 16, face = "bold"),
+        axis.text.y = element_text(size = 14, face = "bold"));media_movil_grafica
+
+```
+
+
+```{r Correlation between positivity rate and number of tests performed per state, echo = F, eval = F}
+pruebas_por_poblacion_entidad <- base_preliminar_estados %>% 
+  group_by(ENTIDAD_UM) %>% 
+  summarise(pruebas_totales = sum(PRUEBAS_TOTALES, na.rm = T),
+            positivos_oficial = sum(POSITIVOS_OFICIAL, na.rm = T),
+            negativos_oficial = sum(NEGATIVOS_OFICIAL, na.rm = T),
+            positivos_med = sum(POSITIVOS_MED, na.rm =T),
+            positivos_lb = sum(POSITIVOS_LB, na.rm =T),
+            positivos_ub = sum(POSITIVOS_UB, na.rm =T),
+            fn_med = sum(FALSOS_NEGATIVOS_MED, na.rm = T),
+            fn_lb = sum(FALSOS_NEGATIVOS_LB, na.rm = T),
+            fn_ub = sum(FALSOS_NEGATIVOS_UB, na.rm = T),
+            proporcion_pos_oficial = round(positivos_oficial/pruebas_totales,2),
+            proporcion_pos_med = round(positivos_med/pruebas_totales,2),
+            proporcion_pos_lb = round(positivos_lb/pruebas_totales,2),
+            proporcion_pos_ub = round(positivos_ub/pruebas_totales,2)) %>% 
+  rename(entidad_um = ENTIDAD_UM) %>% 
+  full_join(entidades_df[1:32,], by = "entidad_um") %>% 
+  mutate(pruebas_por_100k = round((pruebas_totales * 100000)/poblacion,2),
+         pruebas_por_10k = round((pruebas_totales * 10000)/poblacion,2)) %>% 
+  filter(!is.na(pruebas_por_10k))
+
+
+cor(pruebas_por_poblacion_entidad$pruebas_por_10k, pruebas_por_poblacion_entidad$proporcion_pos_oficial, method = "spearman")
+cor(pruebas_por_poblacion_entidad$pruebas_por_10k, pruebas_por_poblacion_entidad$proporcion_pos_med, method = "spearman")
+cor(pruebas_por_poblacion_entidad$pruebas_por_10k, pruebas_por_poblacion_entidad$proporcion_pos_lb, method = "spearman")
+cor(pruebas_por_poblacion_entidad$pruebas_por_10k, pruebas_por_poblacion_entidad$proporcion_pos_ub, method = "spearman")
+```
+
+
+```{r Supplementary material information, include = T, echo = F}
+periodo <- glimpse(filter(covid_mx, FECHA_INGRESO >= "2020-02-27" &
+         FECHA_INGRESO <= "2020-09-21"))
+
+periodo_2 <- filter(periodo, RESULTADO != 3)
+
+periodo_3 <- filter(periodo_2, FECHA_INGRESO - FECHA_SINTOMAS > 20)
+
+periodo_4 <- filter(periodo_2, is.na(ID_REGISTRO))
+```
+
