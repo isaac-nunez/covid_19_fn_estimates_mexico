@@ -1,4 +1,4 @@
-# covid_19_fn_estimates_mexico
+Impact of SARS-CoV-2 RT-PCR false negative results in COVID-19 surveillance in Mexico
 Estimated false negative tests in Mexico using open data provided by the Health Ministry. </br>
 
 
