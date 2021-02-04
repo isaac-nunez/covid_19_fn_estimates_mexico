@@ -1,7 +1,7 @@
 ---
-title: "codigo_manuscrito"
+title: "Manuscript code"
 author: "Isaac Núñez"
-date: "14/8/2020"
+date: "10/12/2020"
 output: html_document
 ---
 
@@ -94,7 +94,7 @@ names(datos_jh_upper) <- toupper(names(datos_jh))
 
 
 ```{r Per-reporting date country-level case estimation, include = F, eval = F, message = F, warning=F}
-#con esto obtengo la base del 12 de abril: el primer día que se puso a disponibilidad la base
+#Code for the first dataframe (april 12)
 base_completa <-  read_csv(bases_csv[1]) %>% 
   select(ID_REGISTRO,FECHA_ACTUALIZACION, FECHA_SINTOMAS, FECHA_INGRESO,FECHA_DEF,
          UCI, RESULTADO) %>% 
@@ -138,8 +138,8 @@ base_completa <-  read_csv(bases_csv[1]) %>%
             FALSOS_NEGATIVOS_UB = sum(FALSOS_NEGATIVOS_UB, na.rm = T)) %>% 
   ungroup() 
 
-#Here we obtain filter the patients whose result changes from "pending" to positive or negative on any given day. It is very slow code, highly recommend to save the resulting dataframe
-#Tengo que cambiar el octubr 6 por octubre 7, que es la fecha en la cual las variables ya cambiaron
+#Here we  filter the patients whose result changes from "pending" to positive or negative on any given day. It is very slow code, highly recommend to save the resulting dataframe
+
 for(i in 2:length(nombres_bases)){
   base_completa <- rbind(base_completa, read_csv(bases_csv[i]) %>% 
                            mutate(RESULTADO = ifelse(FECHA_ACTUALIZACION <= "2020-10-06" & exists("RESULTADO_LAB") == F,
@@ -243,7 +243,7 @@ base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting
 base_completa_per_reporting_date$fecha_actualizacion[base_completa_per_reporting_date$proporcion_positivos_oficial >=0.5][1]
 ```
 
-Falta correr lo que está abajo de esto
+
 ```{r Per-reporting date country-wide ICU admission and deaths estimation, echo=F, eval = F, message = F, warning=F}
 base_uci_defunciones_diario <- read_csv(bases_csv[1]) %>% 
   mutate(FECHA_CONTAGIO_5 = FECHA_SINTOMAS - 5,
@@ -895,7 +895,7 @@ for(i in 2:length(nombres_bases)){
 }
 
 #Suggest saving this data.frame as code is slow
-save(base_preliminar_estados, file = "base_preliminar_estados_oct_31.Rda")
+#save(base_preliminar_estados, file = "base_preliminar_estados_oct_31.Rda")
 ```
 
 
@@ -1283,7 +1283,9 @@ for(i in 1:32){
 ```
 
 
-```{r State table printing, echo = F, eval = T, warning=F}
+```{r State table printing, echo = F, eval = F, warning=F}
+#Change eval to TRUE if wish to generate single tables for each state
+
 guardar_tabla <- function(x,y){
 save_as_docx(flextable(x, cwidth = 1.5) %>% 
                add_header_lines(str_c("Table ", seq(from=1, to =32, by=1)," Supplementary Appendix. ", 
